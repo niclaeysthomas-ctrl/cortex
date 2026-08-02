@@ -126,6 +126,15 @@
   .nav-i span{display:block;font-size:10px;font-weight:700;margin-top:3px;letter-spacing:.2px}
   .nav-i.on{color:var(--acc)}
   .nav-i.on[data-r=predire]{color:var(--mint)} .nav-i.on[data-r=decider]{color:var(--decider)}
+  .nav-i.on[data-r=transfert]{color:var(--amber)}
+  .opt{display:block;width:100%;text-align:left;background:var(--bg3);border:1px solid var(--line);border-radius:12px;
+    padding:13px 15px;margin-top:9px;font-size:14.5px;font-weight:600;color:var(--txt);cursor:pointer;transition:.12s}
+  .opt:active{transform:scale(.99)}
+  .opt.right{border-color:var(--ok);background:#12321f;color:#bff3d0}
+  .opt.wrong{border-color:var(--bad);background:#321518;color:#ffc7cd}
+  .opt.dim{opacity:.5}
+  .lucidbar{display:flex;gap:8px;margin-top:14px}
+  .lucidbar button{flex:1}
 
   .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(100px + env(safe-area-inset-bottom));
     background:var(--acc);color:#fff;font-weight:800;padding:11px 20px;border-radius:24px;z-index:100;
@@ -147,17 +156,28 @@
 </div>
 
 <script src="data.js"></script>
+<script src="transfert.js"></script>
 <script>
 /* ================= ÉTAT ================= */
 const LS='cortex_v2';
 const DEFAULT={
-  xp:0, streak:0, lastDay:null, quests:{date:null, m:0, p:0, d:0},
-  master:{}, // id -> {ef,int,reps,due,grade}
+  xp:0, streak:0, lastDay:null, quests:{date:null, m:0, p:0, d:0, t:0},
+  master:{}, // id -> {ef,int,reps,due,grade,answer,apply}
   calib:{recs:[], seen:[], preds:[]},
-  decisions:[]
+  decisions:[],
+  transfer:{items:{}, recs:[], seen:[]}, // items: id->{ef,int,reps,due}  recs:[{ok}]  seen:[scenarioId]
+  lucid:{seen:0, vu:0, partiel:0}, // anticipation du twist avant révélation
+  seanceLog:[], // dates des séances quotidiennes bouclées
+  missions:{log:[], fermi:[], sSeen:[], fSeen:[]} // log:[{type,date,...}] fermi:[{orders}] sSeen/fSeen: index vus
 };
 let S=load();
 function load(){try{return Object.assign(JSON.parse(JSON.stringify(DEFAULT)),JSON.parse(localStorage.getItem(LS))||{})}catch(e){return JSON.parse(JSON.stringify(DEFAULT))}}
+/* normalisation : champs ajoutés après coup pour les états déjà stockés */
+if(!S.transfer)S.transfer={items:{},recs:[],seen:[]};
+if(!S.transfer.items)S.transfer.items={};
+if(!S.lucid)S.lucid={seen:0,vu:0,partiel:0};
+if(!S.seanceLog)S.seanceLog=[];
+if(!S.missions)S.missions={log:[],fermi:[],sSeen:[],fSeen:[]};
 function save(){localStorage.setItem(LS,JSON.stringify(S))}
 function today(){return new Date().toISOString().slice(0,10)}
 function daysBetween(a,b){return Math.round((new Date(b)-new Date(a))/864e5)}
@@ -173,7 +193,7 @@ function levelInfo(){let i=0;for(let k=0;k<LEVELS.length;k++)if(S.xp>=LEVELS[k].
 
 function touchStreak(){const t=today();if(S.lastDay===t)return;
   if(S.lastDay && daysBetween(S.lastDay,t)===1)S.streak++;else S.streak=1;S.lastDay=t;}
-function ensureQuests(){if(S.quests.date!==today())S.quests={date:today(),m:0,p:0,d:0};}
+function ensureQuests(){if(S.quests.date!==today())S.quests={date:today(),m:0,p:0,d:0,t:0,seance:0};}
 function addXP(n,label){const before=levelInfo().i;S.xp+=n;touchStreak();save();
   const after=levelInfo().i;
   if(after>before)toast(`⬆️ Niveau ${after} — ${LEVELS[after-1].nom}`,1900);
@@ -188,7 +208,8 @@ function toast(msg,ms=1400){clearTimeout(toastT);let e=document.querySelector('.
 /* ================= ROUTAGE ================= */
 const NAV=[
  {r:'accueil',ic:'🏠',t:'Accueil'},
- {r:'master',ic:'📖',t:'Masterclass'},
+ {r:'master',ic:'📖',t:'Grilles'},
+ {r:'transfert',ic:'🔀',t:'Transfert'},
  {r:'predire',ic:'🎯',t:'Prédire'},
  {r:'decider',ic:'🗂️',t:'Décisions'}];
 let route='accueil';
@@ -198,9 +219,11 @@ function renderNav(){document.getElementById('nav').innerHTML=NAV.map(n=>
      <div class="ic">${n.ic}</div><span>${n.t}</span></div>`).join('');}
 function render(){ensureQuests();renderNav();syncHeader();
   const v=document.getElementById('view');
-  v.innerHTML=({accueil:vAccueil,master:vMaster,predire:vPredire,decider:vDecider}[route])();
+  v.innerHTML=({accueil:vAccueil,master:vMaster,transfert:vTransfert,seance:vSeance,profil:vProfil,mission:vMissions,predire:vPredire,decider:vDecider}[route])();
   if(route==='predire')mountPredire();
-  if(route==='master')mountMaster();}
+  if(route==='master')mountMaster();
+  if(route==='transfert')mountTransfert();
+  if(route==='seance')mountSeance();}
 
 /* ================= ACCUEIL ================= */
 function vAccueil(){
@@ -211,8 +234,10 @@ function vAccueil(){
   const learned=Object.keys(S.master).length;
   const toReview=S.decisions.filter(d=>!d.reviewed&&d.reviewDate<=today()).length;
   const brier=avgBrier();
+  const tQ=queueTransfert();
   const quests=[
     {ic:'📖',t:'Étudier une grille de lecture',s:due.mode==='review'?`${due.dueN} à réviser`:due.mode==='new'?`${MASTERCLASS.length-learned} nouvelles`:'Bibliothèque à jour ✓',done:q.m>0,r:'master'},
+    {ic:'🔀',t:'Repérer une grille en situation',s:tQ.mode==='review'?`${tQ.dueN} à rejouer`:tQ.mode==='new'?`${tQ.freshN} cas à découvrir`:'Tous les cas vus ✓',done:q.t>0,r:'transfert'},
     {ic:'🎯',t:'Calibrer 3 prédictions',s:`${Math.min(q.p,3)}/3 aujourd'hui`,done:q.p>=3,r:'predire'},
     {ic:'🗂️',t:'Journal de décision',s:toReview?`${toReview} à évaluer !`:'Logger ou évaluer',done:q.d>0,r:'decider'},
   ];
@@ -229,9 +254,20 @@ function vAccueil(){
     <div class="stat"><b style="color:var(--acc2)">${learned}<span style="font-size:14px;color:var(--dim)">/${MASTERCLASS.length}</span></b><small>Grilles</small></div>
     <div class="stat"><b style="color:var(--mint)">${brier===null?'—':brier.toFixed(2)}</b><small>Brier</small></div>
   </div>
+  ${S.quests.seance?
+    `<div class="card" style="border-color:var(--mint);display:flex;align-items:center;gap:12px">
+       <div style="font-size:26px">✓</div>
+       <div><b style="font-size:15px">Séance du jour faite.</b><span class="sub" style="display:block">Le reste se passe dehors. Ferme et va vivre.</span></div>
+     </div>`:
+    `<button class="btn" style="font-size:16px;padding:17px" onclick="startSeance()">▶ Commencer la séance du jour · ~20 min</button>
+     <p class="sub" style="text-align:center;margin:8px 0 16px">Rappel → raisonnement → apprentissage → production. Un seul fil, pas quatre onglets à picorer.</p>`}
+  <div class="row2" style="margin-bottom:12px">
+    <button class="btn ghost small" style="margin:0" onclick="go('mission')">🎯 Missions</button>
+    <button class="btn ghost small" style="margin:0" onclick="go('profil')">🧭 Profil cognitif</button>
+  </div>
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">
-      <b style="font-size:16px">Aujourd'hui</b><span class="mini">${doneCount}/3</span>
+      <b style="font-size:16px">Ou à la carte</b><span class="mini">${doneCount}/${quests.length}</span>
     </div>
     ${quests.map(x=>`
       <div class="quest ${x.done?'done':''}" onclick="go('${x.r}')">
@@ -239,15 +275,16 @@ function vAccueil(){
         <div class="qt"><b>${x.t}</b><small>${x.s}</small></div>
         <div class="qx">${x.done?'✓':'→'}</div>
       </div>`).join('')}
-    ${doneCount===3?'<div class="reveal ok" style="margin-top:14px"><b>Journée pleine.</b> Une grille apprise, ta calibration nourrie, une décision tracée. C\'est la régularité qui compose.</div>':''}
+    ${doneCount===quests.length?'<div class="reveal ok" style="margin-top:14px"><b>Journée pleine.</b> Une grille apprise, une repérée en situation, ta calibration nourrie, une décision tracée. C\'est la régularité qui compose.</div>':''}
   </div>
   <div class="flag">
-    <b>Le vrai test.</b> Une grille de lecture ne vaut que si tu l'<b>appliques</b>. Étudier sans le défi d'application = consommation intellectuelle qui flatte et ne change rien. Prédire et Décisions sont là pour ça : mesurer si tes grilles tiennent au contact du réel.
+    <b>Le vrai test.</b> Une grille de lecture ne vaut que si tu la <b>repères</b> puis l'<b>appliques</b>. Étudier sans le reconnaître dans la nature = consommation qui flatte et ne change rien. Transfert, Prédire et Décisions sont là pour ça : mesurer si tes grilles tiennent au contact du réel.
   </div>`;
 }
 
 /* ================= MASTERCLASS ================= */
-let curM=null, mStage=0;
+let curM=null, mStage=0, curMode='new';
+function lucidRate(){const s=S.lucid.seen||0;if(s<4)return null;return Math.round(((S.lucid.vu||0)+0.5*(S.lucid.partiel||0))/s*100);}
 const DOMAINES=[...new Set(MASTERCLASS.map(f=>f.dom))];
 /* entrelace : choisit une nouvelle grille dans le domaine le moins avancé */
 function pickFresh(fresh){
@@ -285,10 +322,10 @@ function vMaster(){
     <div class="divider"></div>
     ${libraryHTML()}`;
   }
-  curM=Q.item;mStage=0;
-  const f=curM;
+  curM=Q.item;mStage=0;curMode=Q.mode;
+  const f=curM;const lr=lucidRate();
   return `<h1 class="page">Masterclass</h1>
-  <p class="page-sub">${Q.mode==='review'?`Révision · ${Q.dueN} à revoir`:`Nouvelle grille · ${learned}/${MASTERCLASS.length} apprises`}${S.focusDom?` · focus ${S.focusDom}`:''}</p>
+  <p class="page-sub">${Q.mode==='review'?`Restitution · ${Q.dueN} à revoir`:`Nouvelle grille · ${learned}/${MASTERCLASS.length} apprises`}${S.focusDom?` · focus ${S.focusDom}`:''}${lr!==null?` · lucidité ${lr}%`:''}</p>
   ${domChips()}
   <div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
@@ -302,47 +339,82 @@ function vMaster(){
 }
 function mountMaster(){
   if(!curM||!document.getElementById('mBody'))return;
-  document.getElementById('mBody').innerHTML=`
-    <p class="sub" style="margin:14px 0 2px;text-align:center">Réponds mentalement (ou écris), <b>puis</b> révèle.</p>
-    <button class="btn ghost" onclick="mReveal(1)">Ce que « tout le monde » répond →</button>`;
+  const b=document.getElementById('mBody');
+  if(curMode==='review'){
+    /* RESTITUTION — rappel actif de mémoire (testing effect) plutôt que re-lecture */
+    b.innerHTML=`
+      <p class="sub" style="margin:14px 0 6px">Tu as déjà vu cette grille. <b>Restitue de mémoire</b>, sans révéler : quel est le twist ? quelle grille de lecture ?</p>
+      <textarea id="mRecall" placeholder="Écris le twist et la grille de mémoire — l'effort de rappel est ce qui ancre…"></textarea>
+      <button class="btn" style="margin-top:12px" onclick="mRevealRecall()">Révéler et me noter →</button>`;
+  }else{
+    b.innerHTML=`
+      <p class="sub" style="margin:14px 0 2px;text-align:center">Réponds mentalement (ou écris), <b>puis</b> révèle.</p>
+      <button class="btn ghost" onclick="mReveal(1)">Ce que « tout le monde » répond →</button>`;
+  }
 }
+/* helpers de révélation partagés (module Grilles + Séance) */
+function twistGrilleHTML(f,withDefi){
+  return `<div class="reveal ok"><span class="lbl">Le twist</span>${f.twist}</div>
+    <div class="reveal"><span class="lbl">La grille de lecture</span><ul class="grille">${f.grille.map(g=>`<li>${g}</li>`).join('')}</ul></div>
+    <div class="reveal mint"><span class="lbl">Exemple réel</span>${f.exemple}</div>
+    ${withDefi?`<div class="reveal amber"><span class="lbl">À toi — applique (l'étape qui compte)</span>${f.defi}</div>`:''}`;
+}
+function gradeRow(fn){
+  return `<p class="mini" style="margin:16px 0 8px">À quel point cette grille est-elle déjà un réflexe chez toi ?</p>
+    <div class="row2">
+      <button class="btn small ghost" style="border-color:var(--bad);color:var(--bad)" onclick="${fn}(2)">Nouvelle</button>
+      <button class="btn small ghost" style="border-color:var(--amber);color:var(--amber)" onclick="${fn}(3)">Vue, pas ancrée</button>
+    </div>
+    <div class="row2" style="margin-top:10px">
+      <button class="btn small ghost" style="border-color:var(--acc);color:var(--acc2)" onclick="${fn}(4)">Solide</button>
+      <button class="btn small mint" onclick="${fn}(5)">Déjà un réflexe</button>
+    </div>`;
+}
+/* bloc complet twist → grille → exemple → défi → notation (partagé nouveau/révision) */
+function mFullBlock(){
+  return twistGrilleHTML(curM,true)+
+    `<textarea id="mApply" placeholder="Ton application concrète (facultatif mais c'est là que ça s'ancre)…" style="margin-top:12px"></textarea>`+
+    gradeRow('gradeM');}
+function mRevealRecall(){const b=document.getElementById('mBody');
+  b.innerHTML=mFullBlock();b.scrollIntoView({behavior:'smooth',block:'start'});}
 function mReveal(stage){
   const f=curM;mStage=stage;const b=document.getElementById('mBody');
   if(stage===1){
     b.innerHTML=`<div class="reveal bad"><span class="lbl">La réponse intuitive (souvent fausse)</span>${f.naif}</div>
-      <button class="btn" onclick="mReveal(2)">Le twist →</button>`;
+      <p class="mini" style="margin:16px 0 4px">Avant de révéler : <b>formule le twist toi-même</b>. Tu le vois venir ?</p>
+      <div class="lucidbar">
+        <button class="btn small ghost" style="border-color:var(--mint);color:var(--mint)" onclick="anticiper('vu')">Je le vois</button>
+        <button class="btn small ghost" style="border-color:var(--amber);color:var(--amber)" onclick="anticiper('partiel')">Vaguement</button>
+        <button class="btn small ghost" style="border-color:var(--dim2);color:var(--dim)" onclick="anticiper('non')">Aucune idée</button>
+      </div>`;
   }else if(stage===2){
     b.innerHTML=`<div class="reveal bad"><span class="lbl">La réponse intuitive</span>${f.naif}</div>
-      <div class="reveal ok"><span class="lbl">Le twist</span>${f.twist}</div>
-      <button class="btn" onclick="mReveal(3)">La grille de lecture + l'exemple →</button>`;
-  }else if(stage===3){
-    b.innerHTML=`<div class="reveal ok"><span class="lbl">Le twist</span>${f.twist}</div>
-      <div class="reveal"><span class="lbl">La grille de lecture</span><ul class="grille">${f.grille.map(g=>`<li>${g}</li>`).join('')}</ul></div>
-      <div class="reveal mint"><span class="lbl">Exemple réel</span>${f.exemple}</div>
-      <div class="reveal amber"><span class="lbl">À toi — applique (l'étape qui compte)</span>${f.defi}</div>
-      <textarea id="mApply" placeholder="Ton application concrète (facultatif mais c'est là que ça s'ancre)…" style="margin-top:12px"></textarea>
-      <p class="mini" style="margin:16px 0 8px">À quel point cette grille est-elle déjà un réflexe chez toi ?</p>
-      <div class="row2">
-        <button class="btn small ghost" style="border-color:var(--bad);color:var(--bad)" onclick="gradeM(2)">Nouvelle</button>
-        <button class="btn small ghost" style="border-color:var(--amber);color:var(--amber)" onclick="gradeM(3)">Vue, pas ancrée</button>
-      </div>
-      <div class="row2" style="margin-top:10px">
-        <button class="btn small ghost" style="border-color:var(--acc);color:var(--acc2)" onclick="gradeM(4)">Solide</button>
-        <button class="btn small mint" onclick="gradeM(5)">Déjà un réflexe</button>
-      </div>`;
-    document.getElementById('mBody').scrollIntoView({behavior:'smooth',block:'start'});
+      ${mFullBlock()}`;
+    b.scrollIntoView({behavior:'smooth',block:'start'});
   }
 }
-function gradeM(g){
-  const f=curM;let d=S.master[f.id]||{ef:2.5,int:0,reps:0};
+/* effet de génération : parier sur le twist avant de le voir, et mesurer sa lucidité */
+function anticiper(kind){
+  S.lucid.seen=(S.lucid.seen||0)+1;
+  if(kind==='vu')S.lucid.vu=(S.lucid.vu||0)+1;
+  else if(kind==='partiel')S.lucid.partiel=(S.lucid.partiel||0)+1;
+  save();
+  const msg=kind==='vu'?'Vérifions si tu le voyais vraiment…':kind==='partiel'?'On regarde ce qui manquait…':'Regarde bien — c\'est là que ça compte.';
+  toast(msg);mReveal(2);
+}
+/* planification SM-2 d'une grille (partagée module + séance) */
+function schedMaster(f,g){
+  let d=S.master[f.id]||{ef:2.5,int:0,reps:0};
   if(g<3){d.reps=0;d.int=1;}
   else{d.reps++;
     d.int=d.reps===1?1:d.reps===2?4:Math.round(d.int*d.ef);
     d.ef=Math.max(1.3,d.ef+(0.1-(5-g)*(0.08+(5-g)*0.02)));}
   const due=new Date();due.setDate(due.getDate()+d.int);d.due=due.toISOString().slice(0,10);d.grade=g;
-  S.master[f.id]=d;
+  S.master[f.id]=d;return d;
+}
+function gradeM(g){
+  const d=schedMaster(curM,g);
   if(!S.quests.m)S.quests.m=1;save();
-  const isNew=g>=3&&d.reps===1;
   addXP(g>=4?12:9, g<3?'Revu bientôt':`Revoir dans ${d.int}j`);
   render();
 }
@@ -361,6 +433,253 @@ function libraryHTML(){
             <span class="sub">${f.twist.replace(/<[^>]+>/g,'').slice(0,110)}…</span>
           </div>`}).join('')}</div>`;
     }).join('');
+}
+
+/* ================= TRANSFERT =================
+   Le muscle décisif : reconnaître QUELLE grille s'applique à une
+   situation réelle non étiquetée (transfert analogique, Gick & Holyoak).
+   Interleaving discriminatif + re-surface des erreurs en espacé.        */
+let curScen=null, scenAnswered=false;
+function transRate(){let hit=0,miss=0;
+  Object.values(S.transfer.items||{}).forEach(it=>{hit+=it.hit||0;miss+=it.miss||0;});
+  const n=hit+miss;return n?Math.round(hit/n*100):null;}
+function queueTransfert(){
+  const items=S.transfer.items||{};
+  const due=SCENARIOS.filter(s=>items[s.id]&&items[s.id].due<=today());
+  const fresh=SCENARIOS.filter(s=>!S.transfer.seen.includes(s.id));
+  if(due.length)return {item:due[0],mode:'review',dueN:due.length,freshN:fresh.length};
+  if(fresh.length){
+    const seenByDom={};SCENARIOS.forEach(s=>{if(S.transfer.seen.includes(s.id))seenByDom[s.dom]=(seenByDom[s.dom]||0)+1;});
+    const pick=fresh.slice().sort((a,b)=>(seenByDom[a.dom]||0)-(seenByDom[b.dom]||0))[0];
+    return {item:pick,mode:'new',dueN:0,freshN:fresh.length};
+  }
+  return {item:null,mode:'done',dueN:0,freshN:0};
+}
+function vTransfert(){
+  const Q=queueTransfert();
+  const seenN=S.transfer.seen.length,rate=transRate(),n=S.transfer.recs.length;
+  const head=`<h1 class="page">Transfert</h1>
+  <p class="page-sub">Le muscle décisif : reconnaître <b>quelle grille</b> s'applique à une situation réelle non étiquetée. Consommer 61 grilles ne sert à rien si tu ne les repères pas dans la nature.</p>
+  <div class="stats">
+    <div class="stat"><b style="color:var(--mint)">${rate===null?'—':rate+'%'}</b><small>Reconnaissance</small></div>
+    <div class="stat"><b style="color:var(--acc2)">${seenN}<span style="font-size:14px;color:var(--dim)">/${SCENARIOS.length}</span></b><small>Cas vus</small></div>
+    <div class="stat"><b>${n}</b><small>Tentatives</small></div>
+  </div>`;
+  if(!Q.item){
+    return head+`<div class="card" style="text-align:center">
+      <div style="font-size:44px">✓</div>
+      <b style="font-size:18px">Tous les cas passés en revue</b>
+      <p class="sub" style="margin-top:6px">La reconnaissance se rejoue en révision espacée — les cas ratés reviennent plus vite. Reviens demain.</p>
+    </div>`;
+  }
+  return head+`<div class="card" id="scenCard"></div>`;
+}
+function mountTransfert(){if(document.getElementById('scenCard'))renderScen();}
+function renderScen(){
+  const Q=queueTransfert();curScen=Q.item;scenAnswered=false;
+  if(!curScen){go('transfert');return;}
+  const s=curScen;
+  const idx=s.options.map((_,i)=>i);
+  for(let i=idx.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[idx[i],idx[j]]=[idx[j],idx[i]];}
+  document.getElementById('scenCard').innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <span class="tag dom">${s.dom}</span>
+      <span class="tag ${Q.mode==='review'?'pointu':'p'}">${Q.mode==='review'?'★ révision':'nouveau cas'}</span>
+    </div>
+    <p style="font-size:16px;margin:14px 0 8px;line-height:1.55">${s.txt}</p>
+    <p class="mini" style="margin:16px 0 4px">Quelle grille est à l'œuvre ?</p>
+    <div id="scenOpts">${idx.map(oi=>`<button class="opt" data-oi="${oi}" onclick="answerScen(${oi})">${s.options[oi]}</button>`).join('')}</div>
+    <div id="scenReveal"></div>`;
+}
+/* planification d'un scénario de transfert (partagée module + séance) */
+function schedScen(s,ok){
+  const items=S.transfer.items||(S.transfer.items={});
+  let d=items[s.id]||{ef:2.5,int:0,reps:0};
+  if(ok){d.reps++;d.int=d.reps===1?2:d.reps===2?6:Math.round(d.int*2.4);}
+  else{d.reps=0;d.int=1;}
+  d.hit=(d.hit||0)+(ok?1:0);d.miss=(d.miss||0)+(ok?0:1);
+  const due=new Date();due.setDate(due.getDate()+d.int);d.due=due.toISOString().slice(0,10);
+  items[s.id]=d;
+  if(!S.transfer.seen.includes(s.id))S.transfer.seen.push(s.id);
+  S.transfer.recs.push({ok});if(S.transfer.recs.length>200)S.transfer.recs.shift();
+  return d;
+}
+function answerScen(chosen){
+  if(scenAnswered)return;scenAnswered=true;
+  const s=curScen,ok=(chosen===s.correct);
+  schedScen(s,ok);
+  if(!S.quests.t)S.quests.t=1;
+  save();addXP(ok?11:6,ok?'Grille reconnue':'Grille manquée — revue bientôt');
+  document.querySelectorAll('#scenOpts .opt').forEach(b=>{
+    const oi=+b.dataset.oi;b.classList.add('dim');b.style.pointerEvents='none';
+    if(oi===s.correct){b.classList.remove('dim');b.classList.add('right');}
+    if(oi===chosen&&!ok){b.classList.remove('dim');b.classList.add('wrong');}
+  });
+  const g=MASTERCLASS.find(m=>m.id===s.ref);
+  document.getElementById('scenReveal').innerHTML=`
+    <div class="reveal ${ok?'ok':'bad'}" style="margin-top:14px"><span class="lbl">${ok?'Vu juste':'La bonne grille : '+s.options[s.correct]}</span>${s.why}</div>
+    ${g?`<div class="reveal mint"><span class="lbl">Revoir la grille complète</span><b>${g.titre}</b> — <span class="sub">${g.twist.replace(/<[^>]+>/g,'').slice(0,150)}…</span></div>`:''}
+    <button class="btn" style="margin-top:12px" onclick="renderScen()">Cas suivant →</button>`;
+  document.getElementById('scenReveal').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
+/* ================= LA SÉANCE =================
+   Le fil conducteur : un flux quotidien guidé ~20 min qui enchaîne
+   rappel actif → raisonnement → apprentissage → production, dans
+   l'ordre pédagogique. Ce n'est PAS un 5e mini-jeu : c'est ce qui
+   relie les autres. Se termine par « ferme-moi et va vivre ».       */
+let Sess=null;
+function buildSeance(){
+  const steps=[];
+  /* Phase 1 — Rappel actif : jusqu'à 2 grilles dues, en restitution de mémoire */
+  const dueGrilles=MASTERCLASS.filter(f=>S.master[f.id]&&S.master[f.id].due<=today());
+  dueGrilles.slice(0,2).forEach(f=>steps.push({phase:'Rappel actif',ic:'🧠',type:'recall',item:f}));
+  /* Phase 2 — Raisonnement : jusqu'à 3 scénarios de transfert (dus d'abord, sinon neufs) */
+  const dueScen=SCENARIOS.filter(s=>S.transfer.items[s.id]&&S.transfer.items[s.id].due<=today());
+  const freshScen=SCENARIOS.filter(s=>!S.transfer.seen.includes(s.id));
+  [...dueScen,...freshScen].slice(0,3).forEach(s=>steps.push({phase:'Raisonnement',ic:'🔀',type:'reason',item:s}));
+  /* Phase 3 — Apprentissage : 1 nouvelle grille (avec anticipation) */
+  const fresh=MASTERCLASS.filter(f=>!S.master[f.id]);
+  const learnItem=fresh.length?pickFresh(fresh):null;
+  if(learnItem)steps.push({phase:'Apprentissage',ic:'📖',type:'learn',item:learnItem});
+  /* Phase 4 — Production : expliquer avec ses mots + parier une application (toujours présente) */
+  const prodTarget=learnItem||dueGrilles[0]||MASTERCLASS[Math.floor(Math.random()*MASTERCLASS.length)];
+  steps.push({phase:'Production',ic:'✍️',type:'produce',item:prodTarget});
+  return {steps,idx:0,correct:0,ansScen:false};
+}
+function startSeance(){Sess=buildSeance();go('seance');}
+function sessQuit(){Sess=null;go('accueil');}
+function vSeance(){
+  if(!Sess)Sess=buildSeance();
+  if(Sess.idx>=Sess.steps.length)return sessDoneHTML();
+  const step=Sess.steps[Sess.idx],n=Sess.steps.length,i=Sess.idx+1;
+  const dots=Sess.steps.map((s,k)=>`<span style="flex:1;height:4px;border-radius:2px;background:${k<Sess.idx?'var(--mint)':k===Sess.idx?'var(--acc)':'var(--bg4)'}"></span>`).join('');
+  return `<div style="display:flex;justify-content:space-between;align-items:flex-start;margin:4px 0 10px">
+      <div><div class="mini">Séance du jour · étape ${i}/${n}</div>
+        <div style="font-size:21px;font-weight:900;margin-top:3px">${step.ic} ${step.phase}</div></div>
+      <button class="btn ghost small" style="width:auto;margin:0;padding:9px 13px" onclick="sessQuit()">Quitter</button>
+    </div>
+    <div style="display:flex;gap:4px;margin-bottom:14px">${dots}</div>
+    <div class="card"><div id="sessBody"></div></div>`;
+}
+function mountSeance(){
+  if(!Sess||Sess.idx>=Sess.steps.length)return;
+  const step=Sess.steps[Sess.idx],b=document.getElementById('sessBody');
+  if(!b)return;
+  const f=step.item;
+  if(step.type==='recall'){
+    curM=f;
+    b.innerHTML=`<span class="tag dom">${f.dom}</span>
+      <h2 style="font-size:20px;font-weight:900;margin:12px 0 10px;line-height:1.25">${f.titre}</h2>
+      <div class="reveal amber" style="margin-top:0"><span class="lbl">La mise en situation</span>${f.accroche}</div>
+      <p class="sub" style="margin:14px 0 6px">Déjà vue. <b>Restitue de mémoire</b> le twist et la grille — sans révéler.</p>
+      <textarea id="sRecall" placeholder="Le twist et la grille, de mémoire…"></textarea>
+      <button class="btn" style="margin-top:12px" onclick="sessRecallReveal()">Révéler et me noter →</button>`;
+  }else if(step.type==='reason'){
+    curScen=f;Sess.ansScen=false;
+    const idx=f.options.map((_,k)=>k);
+    for(let k=idx.length-1;k>0;k--){const j=Math.floor(Math.random()*(k+1));[idx[k],idx[j]]=[idx[j],idx[k]];}
+    b.innerHTML=`<span class="tag dom">${f.dom}</span>
+      <p style="font-size:16px;margin:14px 0 8px;line-height:1.55">${f.txt}</p>
+      <p class="mini" style="margin:16px 0 4px">Quelle grille est à l'œuvre ?</p>
+      <div id="sOpts">${idx.map(oi=>`<button class="opt" data-oi="${oi}" onclick="sessAnswerScen(${oi})">${f.options[oi]}</button>`).join('')}</div>
+      <div id="sReveal"></div>`;
+  }else if(step.type==='learn'){
+    curM=f;
+    b.innerHTML=`<span class="tag dom">${f.dom}</span>
+      <span class="tag ${f.niv}" style="margin-left:6px">${f.niv==='pointu'?'★ un cran au-dessus':'solide'}</span>
+      <h2 style="font-size:20px;font-weight:900;margin:12px 0 10px;line-height:1.25">${f.titre}</h2>
+      <div class="reveal amber" style="margin-top:0"><span class="lbl">La mise en situation</span>${f.accroche}</div>
+      <p class="sub" style="margin:14px 0 2px;text-align:center">Réponds mentalement, <b>puis</b> révèle.</p>
+      <button class="btn ghost" onclick="sessLearnNaif()">Ce que « tout le monde » répond →</button>`;
+  }else if(step.type==='produce'){
+    b.innerHTML=`<div class="mini" style="color:var(--amber)">Production — le test le plus dur</div>
+      <h2 style="font-size:19px;font-weight:900;margin:8px 0 10px;line-height:1.3">${f.titre}</h2>
+      <p class="sub" style="margin-bottom:4px">Explique cette grille à quelqu'un qui n'y connaît rien, avec <b>tes mots</b>, sans jargon. Si tu ne peux pas l'expliquer simplement, tu ne l'as pas comprise (Feynman).</p>
+      <textarea id="sProd" placeholder="Explique-la comme à un pote au comptoir…"></textarea>
+      <p class="sub" style="margin:14px 0 4px">Puis parie : <b>où</b> vas-tu la repérer ou l'appliquer cette semaine ?</p>
+      <textarea id="sApply" placeholder="Une situation concrète, datée…"></textarea>
+      <button class="btn mint" onclick="sessProduceDone()">Terminer la séance →</button>`;
+  }
+}
+function sessRecallReveal(){
+  const f=Sess.steps[Sess.idx].item,b=document.getElementById('sessBody');
+  b.innerHTML=`<span class="tag dom">${f.dom}</span>
+    <h2 style="font-size:20px;font-weight:900;margin:12px 0 10px;line-height:1.25">${f.titre}</h2>`+
+    twistGrilleHTML(f,false)+gradeRow('sessGradeM');
+  b.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function sessLearnNaif(){
+  const f=Sess.steps[Sess.idx].item,b=document.getElementById('sessBody');
+  b.innerHTML=`<div class="reveal bad"><span class="lbl">La réponse intuitive (souvent fausse)</span>${f.naif}</div>
+    <p class="mini" style="margin:16px 0 4px">Avant de révéler : <b>formule le twist toi-même</b>. Tu le vois venir ?</p>
+    <div class="lucidbar">
+      <button class="btn small ghost" style="border-color:var(--mint);color:var(--mint)" onclick="sessAntic('vu')">Je le vois</button>
+      <button class="btn small ghost" style="border-color:var(--amber);color:var(--amber)" onclick="sessAntic('partiel')">Vaguement</button>
+      <button class="btn small ghost" style="border-color:var(--dim2);color:var(--dim)" onclick="sessAntic('non')">Aucune idée</button>
+    </div>`;
+}
+function sessAntic(kind){
+  S.lucid.seen=(S.lucid.seen||0)+1;
+  if(kind==='vu')S.lucid.vu=(S.lucid.vu||0)+1;
+  else if(kind==='partiel')S.lucid.partiel=(S.lucid.partiel||0)+1;
+  save();
+  const f=Sess.steps[Sess.idx].item,b=document.getElementById('sessBody');
+  b.innerHTML=twistGrilleHTML(f,true)+
+    `<textarea id="mApply" placeholder="Ton application concrète (facultatif)…" style="margin-top:12px"></textarea>`+
+    gradeRow('sessGradeM');
+  b.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function sessGradeM(g){
+  const f=Sess.steps[Sess.idx].item;
+  schedMaster(f,g);
+  if(!S.quests.m)S.quests.m=1;save();
+  addXP(g>=4?12:9,g<3?'Revu bientôt':'Ancré');
+  sessNext();
+}
+function sessAnswerScen(chosen){
+  if(Sess.ansScen)return;Sess.ansScen=true;
+  const s=Sess.steps[Sess.idx].item,ok=(chosen===s.correct);
+  schedScen(s,ok);if(ok)Sess.correct++;
+  if(!S.quests.t)S.quests.t=1;save();addXP(ok?11:6,ok?'Grille reconnue':'Grille manquée');
+  document.querySelectorAll('#sOpts .opt').forEach(btn=>{
+    const oi=+btn.dataset.oi;btn.classList.add('dim');btn.style.pointerEvents='none';
+    if(oi===s.correct){btn.classList.remove('dim');btn.classList.add('right');}
+    if(oi===chosen&&!ok){btn.classList.remove('dim');btn.classList.add('wrong');}
+  });
+  const g=MASTERCLASS.find(m=>m.id===s.ref);
+  document.getElementById('sReveal').innerHTML=`
+    <div class="reveal ${ok?'ok':'bad'}" style="margin-top:14px"><span class="lbl">${ok?'Vu juste':'La bonne grille : '+s.options[s.correct]}</span>${s.why}</div>
+    ${g?`<div class="reveal mint"><span class="lbl">La grille</span><b>${g.titre}</b></div>`:''}
+    <button class="btn" style="margin-top:12px" onclick="sessNext()">Continuer →</button>`;
+  document.getElementById('sReveal').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function sessProduceDone(){
+  const f=Sess.steps[Sess.idx].item;
+  const prod=(document.getElementById('sProd')||{}).value||'';
+  const appl=(document.getElementById('sApply')||{}).value||'';
+  if(prod.trim()){const d=S.master[f.id]||{ef:2.5,int:0,reps:0};d.explain=prod.trim();S.master[f.id]=d;}
+  /* log de séance (une fois/jour) pour la rétention */
+  if(!S.seanceLog)S.seanceLog=[];
+  if(S.seanceLog[S.seanceLog.length-1]!==today())S.seanceLog.push(today());
+  S.quests.seance=1;
+  save();addXP(15,'Séance bouclée');
+  sessNext();
+}
+function sessNext(){Sess.idx++;save();render();window.scrollTo(0,0);}
+function sessDoneHTML(){
+  const n=Sess?Sess.steps.length:0,c=Sess?Sess.correct:0;
+  const lr=lucidRate();
+  return `<div class="card hero" style="text-align:center">
+      <div style="font-size:44px">✓</div>
+      <div class="lvlname" style="font-size:22px;margin:6px 0 4px">Séance bouclée</div>
+      <p class="sub">${n} étapes · ${c} grilles reconnues en situation${lr!==null?` · lucidité ${lr}%`:''}</p>
+    </div>
+    <div class="flag" style="border-style:solid;border-color:var(--mint)">
+      <b style="color:var(--mint)">Maintenant, ferme CORTEX.</b> Le vrai transfert ne se fait pas ici — il se fait dehors. Va <b>dormir</b> (la consolidation mémoire se joue cette nuit, pas dans une 6e étape), <b>lire</b>, <b>boxer</b>, ou <b>discuter</b> une idée avec quelqu'un qui te contredit. Une app honnête sait s'effacer : rouvrir maintenant pour « faire plus » ne t'ancrera rien de plus — c'est de la consommation qui se déguise en effort.
+    </div>
+    <p class="sub" style="text-align:center;margin:2px 0 12px">La science est têtue là-dessus : sommeil + effort aérobie (ta boxe) font davantage pour ta cognition que n'importe quel exercice d'écran.</p>
+    <button class="btn ghost" onclick="sessQuit()">Retour à l'accueil</button>`;
 }
 
 /* ================= PRÉDIRE (calibration) ================= */
@@ -535,6 +854,229 @@ function reviewDec(id,good){const d=S.decisions.find(x=>x.id===id);if(!d)return;
   const lesson=prompt(good?'Qu\'est-ce qui a bien marché ? (leçon à garder)':'Qu\'aurais-tu dû voir ? (leçon à garder)')||'';
   d.reviewed=true;d.good=good;d.lesson=lesson;S.calib.recs.push({p:d.confidence/100,v:good});
   if(!S.quests.d)S.quests.d=1;save();addXP(15,'Décision évaluée — boucle bouclée');render();}
+
+/* ================= PROFIL COGNITIF =================
+   La carte de tes connaissances (lecture seule) : maîtrisé / oublié /
+   erreurs récurrentes / sur- vs sous-confiance PAR DOMAINE. Ce n'est
+   pas un score d'intelligence — c'est un miroir pour orienter l'effort. */
+function domainProfile(){
+  return DOMAINES.map(dom=>{
+    const grilles=MASTERCLASS.filter(f=>f.dom===dom);
+    const learned=grilles.filter(f=>S.master[f.id]).length;
+    let hit=0,miss=0;
+    SCENARIOS.filter(s=>s.dom===dom).forEach(s=>{const it=S.transfer.items[s.id];if(it){hit+=it.hit||0;miss+=it.miss||0;}});
+    const attempts=hit+miss;
+    return {dom,learned,total:grilles.length,recog:attempts?Math.round(hit/attempts*100):null,attempts};
+  });
+}
+function vProfil(){
+  const learnedIds=Object.keys(S.master);
+  const mastered=learnedIds.filter(id=>S.master[id].reps>=3).length;
+  const due=MASTERCLASS.filter(f=>S.master[f.id]&&S.master[f.id].due<=today()).length;
+  const rec=transRate(),lr=lucidRate(),brier=avgBrier();
+  const doms=domainProfile();
+  const scored=doms.filter(d=>d.attempts>=3&&d.recog!==null);
+  let blind=null,strong=null;
+  scored.forEach(d=>{if(blind===null||d.recog<blind.recog)blind=d;if(strong===null||d.recog>strong.recog)strong=d;});
+  const errs=SCENARIOS.map(s=>({s,it:S.transfer.items[s.id]}))
+    .filter(x=>x.it&&(x.it.miss||0)>=2).sort((a,b)=>(b.it.miss||0)-(a.it.miss||0));
+  let verdict;
+  if(!scored.length){
+    verdict=`<div class="flag"><b>Pas encore assez de matière.</b> Enchaîne quelques séances : la carte se dessine quand tu as tenté assez de grilles en situation. Un profil sans données, c'est de l'astrologie.</div>`;
+  }else{
+    verdict=`<div class="reveal ${blind&&blind.recog<50?'bad':'amber'}"><span class="lbl">Ton angle mort</span>
+      <b>${blind.dom}</b> — tu as appris ${blind.learned}/${blind.total} grilles mais n'en reconnais que <b>${blind.recog}%</b> en situation. ${blind.recog<50?'Tu <b>connais</b> la théorie et tu ne la <b>vois</b> pas quand elle se présente : c\'est l\'illusion de compétence, la sur-confiance la plus coûteuse.':'À consolider côté application.'}</div>
+      ${strong&&strong.dom!==blind.dom?`<div class="reveal ok"><span class="lbl">Là où tu te sous-estimes peut-être</span><b>${strong.dom}</b> — ${strong.recog}% de reconnaissance. Solide. Ne le fuis pas par confort : va chercher le pointu.</div>`:''}`;
+  }
+  return `<div style="display:flex;justify-content:space-between;align-items:center">
+      <h1 class="page" style="margin-bottom:2px">Profil cognitif</h1>
+      <button class="btn ghost small" style="width:auto;margin:0;padding:9px 13px" onclick="go('accueil')">✕</button>
+    </div>
+  <p class="page-sub">Pas une note d'intelligence — une carte de ce que tu maîtrises, oublies et sur-estimes. Un miroir, pas un trophée.</p>
+  <div class="stats">
+    <div class="stat"><b style="color:var(--acc2)">${mastered}<span style="font-size:14px;color:var(--dim)">/${learnedIds.length||0}</span></b><small>Ancrées</small></div>
+    <div class="stat"><b style="color:var(--amber)">${due}</b><small>Qui s'effacent</small></div>
+    <div class="stat"><b style="color:var(--mint)">${rec===null?'—':rec+'%'}</b><small>Reconnaissance</small></div>
+  </div>
+  <div class="card">
+    <div class="mini" style="margin-bottom:4px">Ta lucidité & ta calibration</div>
+    <p class="sub">Lucidité (tu vois le twist venir) : <b style="color:var(--txt)">${lr===null?'— (trop peu de grilles)':lr+'%'}</b> · Score de Brier (Prédire) : <b style="color:var(--txt)">${brier===null?'—':brier.toFixed(3)}</b></p>
+  </div>
+  ${verdict}
+  <div class="mini" style="margin:20px 0 10px">Par domaine — savoir vs application</div>
+  ${doms.map(d=>{const cov=Math.round(d.learned/d.total*100);
+    return `<div class="libitem">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <b style="font-size:14.5px">${d.dom}</b>
+        <span class="sub">${d.recog===null?'jamais tenté en situation':`reconnu ${d.recog}%`}</span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
+        <span class="mini" style="width:54px">appris</span>
+        <div class="xpbar" style="flex:1"><i style="width:${cov}%"></i></div>
+        <span class="sub" style="width:44px;text-align:right">${d.learned}/${d.total}</span>
+      </div>
+      ${d.recog!==null?`<div style="display:flex;gap:6px;align-items:center;margin-top:6px">
+        <span class="mini" style="width:54px">reconnu</span>
+        <div class="xpbar" style="flex:1"><i style="width:${d.recog}%;background:linear-gradient(90deg,var(--mint),var(--acc2))"></i></div>
+        <span class="sub" style="width:44px;text-align:right">${d.recog}%</span>
+      </div>`:''}
+    </div>`}).join('')}
+  ${errs.length?`<div class="mini" style="margin:20px 0 10px;color:var(--bad)">Tes erreurs récurrentes (${errs.length})</div>
+    ${errs.slice(0,6).map(x=>{const g=MASTERCLASS.find(m=>m.id===x.s.ref);
+      return `<div class="libitem" style="border-left:3px solid var(--bad)">
+        <div style="display:flex;justify-content:space-between;gap:8px">
+          <b style="font-size:14px">${g?g.titre:x.s.ref}</b>
+          <span class="pill bad" style="flex-shrink:0">raté ${x.it.miss||0}×</span>
+        </div>
+        <span class="sub">${x.s.dom} · cette grille ne se déclenche pas encore chez toi. À revoir en priorité.</span>
+      </div>`}).join('')}`:''}
+  <div class="divider"></div>
+  <p class="sub" style="text-align:center;margin-bottom:8px">Le progrès ne se lit pas dans un chiffre unique. Il se lit ici : l'angle mort qui rétrécit, l'erreur qui cesse de revenir.</p>`;
+}
+
+/* ================= MISSIONS (dans la vraie vie) =================
+   Sortir de l'écran : steelman (défendre l'opinion opposée) et Fermi
+   (estimer AVANT de chercher). Production active + calibration.        */
+const STEELMAN=[
+ "Le nucléaire est la meilleure réponse au changement climatique.",
+ "Les très hautes rémunérations des dirigeants sont économiquement justifiées.",
+ "Il faudrait supprimer le salaire minimum.",
+ "La décroissance est la seule trajectoire soutenable.",
+ "Les réseaux sociaux devraient être interdits aux moins de 16 ans.",
+ "L'aide au développement fait globalement plus de mal que de bien.",
+ "La spéculation financière est socialement utile.",
+ "Un protectionnisme ciblé peut être rationnel pour un pays.",
+ "Noter les élèves nuit plus qu'il n'aide à l'apprentissage.",
+ "L'IA créera plus d'emplois qu'elle n'en détruira.",
+ "La méritocratie est en grande partie une illusion.",
+ "Une césure vaut mieux qu'un stage médiocre pris par peur du vide."
+];
+const FERMI=[
+ {q:"Combien de baguettes de pain sont vendues en France chaque jour ?",val:3e7,unit:"baguettes",path:"~30 millions : ~67 M d'habitants, ~une demi-baguette/j en moyenne."},
+ {q:"Combien pèse (en tonnes) tout l'or jamais extrait par l'humanité ?",val:2e5,unit:"tonnes",path:"~200 000 t — tiendrait dans un cube de ~22 m d'arête."},
+ {q:"Combien de battements ton cœur fera-t-il dans une vie de 80 ans ?",val:3e9,unit:"battements",path:"~70/min × 60 × 24 × 365 × 80 ≈ 3 milliards."},
+ {q:"Combien de litres d'eau pour produire 1 kg de bœuf (empreinte totale) ?",val:15000,unit:"litres",path:"~15 000 L : surtout l'eau des cultures fourragères."},
+ {q:"Combien de smartphones sont vendus dans le monde chaque année ?",val:1.2e9,unit:"smartphones",path:"~1,2 milliard/an."},
+ {q:"Combien de secondes vis-tu si tu atteins 80 ans ?",val:2.5e9,unit:"secondes",path:"80 × 365 × 24 × 3600 ≈ 2,5 milliards."},
+ {q:"Combien de voitures particulières circulent en France ?",val:3.8e7,unit:"voitures",path:"~38 millions."},
+ {q:"Combien de cellules dans un corps humain adulte ?",val:3.7e13,unit:"cellules",path:"~3,7 × 10¹³ (37 000 milliards)."},
+ {q:"Combien de mots dans un roman de longueur moyenne ?",val:90000,unit:"mots",path:"~80 000–100 000 mots."},
+ {q:"Quel est le budget annuel de dépenses de l'État français (pas toutes administrations) ?",val:5e11,unit:"€",path:"~500 milliards € (l'ensemble des administrations ~1 600 Md)."}
+];
+let curFermi=null,fermiAnswered=false;
+function fermiMedianOrders(){if(!S.missions.fermi.length)return null;
+  const arr=S.missions.fermi.map(x=>x.orders).sort((a,b)=>a-b);const m=arr[Math.floor(arr.length/2)];return m;}
+function vMissions(){
+  const doneN=S.missions.log.length;
+  const fo=fermiMedianOrders();
+  return `<div style="display:flex;justify-content:space-between;align-items:center">
+      <h1 class="page" style="margin-bottom:2px">Missions</h1>
+      <button class="btn ghost small" style="width:auto;margin:0;padding:9px 13px" onclick="go('accueil')">✕</button>
+    </div>
+  <p class="page-sub">Sortir de l'écran. Deux exercices que la théorie seule ne remplace pas : défendre le camp d'en face, et estimer avant de chercher.</p>
+  <div class="stats">
+    <div class="stat"><b style="color:var(--acc2)">${doneN}</b><small>Missions</small></div>
+    <div class="stat"><b style="color:var(--mint)">${fo===null?'—':(fo<=1?'±1':'±'+fo.toFixed(1))}</b><small>Ordre Fermi</small></div>
+    <div class="stat"><b style="color:var(--amber)">${S.missions.fermi.length}</b><small>Estimations</small></div>
+  </div>
+  <div class="card" style="border-color:var(--acc)">
+    <div class="tag dom">Steelman</div>
+    <h2 style="font-size:18px;font-weight:900;margin:10px 0 6px">Défends l'opinion opposée</h2>
+    <p class="sub">Prends une thèse, écris le <b>meilleur</b> argument de chaque camp. Celui qui te vient le plus facilement révèle ton biais par défaut.</p>
+    <button class="btn" onclick="startSteelman()">Lancer un steelman →</button>
+  </div>
+  <div class="card" style="border-color:var(--mint)">
+    <div class="tag std">Estimation Fermi</div>
+    <h2 style="font-size:18px;font-weight:900;margin:10px 0 6px">Estime avant de chercher</h2>
+    <p class="sub">Un ordre de grandeur, à partir de rien. Google tue le muscle de l'estimation ; ici tu paries d'abord.</p>
+    <button class="btn mint" onclick="startFermi()">Lancer une estimation →</button>
+  </div>
+  <div id="missionArea"></div>
+  ${S.missions.log.length?`<div class="mini" style="margin:20px 0 8px">Historique</div>
+    ${S.missions.log.slice().reverse().slice(0,8).map(m=>`<div class="libitem">
+      <div style="display:flex;justify-content:space-between;gap:8px">
+        <b style="font-size:13.5px">${m.type==='steelman'?'🗣️ Steelman':'📐 Fermi'}</b>
+        <span class="sub" style="flex-shrink:0">${m.date}</span>
+      </div>
+      <span class="sub">${esc((m.claim||m.q||'').slice(0,90))}</span>
+    </div>`).join('')}`:''}`;
+}
+function pickIdx(seenArr,len){let un=[];for(let i=0;i<len;i++)if(!seenArr.includes(i))un.push(i);
+  const pool=un.length?un:[...Array(len).keys()];return pool[Math.floor(Math.random()*pool.length)];}
+function startSteelman(){
+  const i=pickIdx(S.missions.sSeen,STEELMAN.length);
+  const claim=STEELMAN[i];
+  document.getElementById('missionArea').innerHTML=`
+    <div class="card" style="border:1.5px solid var(--acc)">
+      <div class="mini" style="color:var(--acc2)">La thèse à travailler</div>
+      <p style="font-size:16px;font-weight:700;margin:8px 0 4px;line-height:1.4">« ${claim} »</p>
+      <label class="fl">Le meilleur argument POUR (même si tu la rejettes)</label>
+      <textarea id="stPour" placeholder="Le steelman du camp que tu n'aimes pas…"></textarea>
+      <label class="fl">Le meilleur argument CONTRE</label>
+      <textarea id="stContre" placeholder="Et l'autre côté, aussi fort…"></textarea>
+      <p class="mini" style="margin:16px 0 8px">Lequel t'a été le plus facile à écrire ?</p>
+      <div class="row2">
+        <button class="btn small ghost" onclick="logSteelman(${i},'pour')">Le POUR</button>
+        <button class="btn small ghost" onclick="logSteelman(${i},'contre')">Le CONTRE</button>
+      </div>
+    </div>`;
+  document.getElementById('missionArea').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function logSteelman(i,easier){
+  const pour=(document.getElementById('stPour')||{}).value||'';
+  const contre=(document.getElementById('stContre')||{}).value||'';
+  if(!pour.trim()||!contre.trim()){toast('Écris les deux camps');return;}
+  if(!S.missions.sSeen.includes(i))S.missions.sSeen.push(i);
+  S.missions.log.push({type:'steelman',date:today(),claim:STEELMAN[i],pour:pour.trim(),contre:contre.trim(),easier});
+  save();addXP(14,'Steelman posé');
+  document.getElementById('missionArea').innerHTML=`<div class="reveal amber">
+    <span class="lbl">Ton biais par défaut</span>
+    Le camp qui t'est venu le plus facilement (<b>${easier==='pour'?'POUR':'CONTRE'}</b>) est ton point d'ancrage — pas forcément le plus juste, juste le plus <i>confortable</i>. La prochaine fois que tu défends cette position, souviens-toi que l'autre argument existait et que tu as su l'écrire. C'est ça, être difficile à tromper.
+    </div>
+    <button class="btn ghost" onclick="startSteelman()">Autre steelman →</button>`;
+  document.getElementById('missionArea').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function startFermi(){
+  const i=pickIdx(S.missions.fSeen,FERMI.length);
+  curFermi=i;fermiAnswered=false;
+  document.getElementById('missionArea').innerHTML=`
+    <div class="card" style="border:1.5px solid var(--mint)">
+      <div class="mini" style="color:var(--mint)">Estimation — d'abord ta tête, pas Google</div>
+      <p style="font-size:16px;font-weight:700;margin:8px 0 6px;line-height:1.4">${FERMI[i].q}</p>
+      <label class="fl">Ton estimation (un nombre — « 3e7 » ou « 30000000 »)</label>
+      <input type="text" id="feNum" placeholder="ordre de grandeur…" inputmode="numeric">
+      <label class="fl">Ton raisonnement (comment tu y arrives)</label>
+      <textarea id="feWhy" placeholder="Décompose : combien de X, fois combien de Y…"></textarea>
+      <button class="btn mint" onclick="answerFermi()">Révéler l'écart →</button>
+      <div id="feReveal"></div>
+    </div>`;
+  document.getElementById('missionArea').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function answerFermi(){
+  if(fermiAnswered)return;
+  const raw=(document.getElementById('feNum')||{}).value||'';
+  const est=parseFloat(raw.replace(/\s/g,'').replace(',','.'));
+  if(!est||est<=0||!isFinite(est)){toast('Entre un nombre positif');return;}
+  fermiAnswered=true;
+  const f=FERMI[curFermi];
+  const orders=Math.abs(Math.log10(est/f.val));
+  if(!S.missions.fSeen.includes(curFermi))S.missions.fSeen.push(curFermi);
+  S.missions.fermi.push({orders});
+  S.missions.log.push({type:'fermi',date:today(),q:f.q,est,val:f.val,orders});
+  save();addXP(orders<=1?14:9,'Estimation faite');
+  const verdict=orders<=0.5?['ok','Excellent — dans le mille (moins d\'un demi-ordre).']
+    :orders<=1?['ok','Solide — à moins d\'un ordre de grandeur. C\'est ça, l\'estimation utile.']
+    :orders<=2?['amber','Correct-ish — un à deux ordres d\'écart. Où ton raisonnement a-t-il dérapé ?']
+    :['bad','Loin — plus de deux ordres. Le piège classique : une étape de la chaîne mal estimée écrase tout.'];
+  document.getElementById('feReveal').innerHTML=`
+    <div class="reveal ${verdict[0]}" style="margin-top:14px">
+      <span class="lbl">Réalité ≈ ${f.val.toLocaleString('fr-FR')} ${f.unit}</span>
+      Ton pari : ${est.toLocaleString('fr-FR')} · écart : <b>${orders.toFixed(1)} ordre(s) de grandeur</b>. ${verdict[1]}<br>
+      <span style="color:var(--dim)">${f.path}</span>
+    </div>
+    <button class="btn ghost" onclick="startFermi()">Autre estimation →</button>`;
+  document.getElementById('feReveal').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
 
 /* boot */
 render();
