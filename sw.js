@@ -1,6 +1,6 @@
 // CORTEX — service worker : network-first, repli cache (100 % hors-ligne)
 // Network-first : en ligne tu as toujours la dernière version, hors-ligne le cache prend le relais.
-const CACHE = "cortex-v1";
+const CACHE = "cortex-v2";
 const ASSETS = ["./", "./index.html", "./data.js", "./transfert.js"];
 
 self.addEventListener("install", e => {
@@ -16,7 +16,9 @@ self.addEventListener("fetch", e => {
   e.respondWith(
     fetch(e.request).then(res => {
       const copy = res.clone();
-      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      // On ne garde QUE les bonnes réponses : pendant une mise en ligne, GitHub Pages
+      // répond 404 quelques secondes, et cette page d'erreur s'installait dans le cache.
+      if (res.ok) caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
       return res;
     }).catch(() => caches.match(e.request, { ignoreSearch: true }).then(h => h || caches.match("./index.html")))
   );
